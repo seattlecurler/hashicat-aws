@@ -1,18 +1,19 @@
 provider "aws" {
-  version = "~> 2.0"
+  version = "~> 3.0"
   region  = var.region
 }
 
-resource aws_vpc "hashicat" {
+resource "aws_vpc" "hashicat" {
   cidr_block           = var.address_space
   enable_dns_hostnames = true
 
   tags = {
-    Name = "${var.prefix}-vpc"
+    name = "${var.prefix}-vpc-${var.region}"
+    environment = "Production"
   }
 }
 
-resource aws_subnet "hashicat" {
+resource "aws_subnet" "hashicat" {
   vpc_id     = aws_vpc.hashicat.id
   cidr_block = var.subnet_prefix
 
@@ -21,7 +22,7 @@ resource aws_subnet "hashicat" {
   }
 }
 
-resource aws_security_group "hashicat" {
+resource "aws_security_group" "hashicat" {
   name = "${var.prefix}-security-group"
 
   vpc_id = aws_vpc.hashicat.id
@@ -60,12 +61,12 @@ resource aws_security_group "hashicat" {
   }
 }
 
-resource random_id "app-server-id" {
-  prefix = "${var.prefix}-hashicat-"
+resource "random_id" "app-server-id" {
+  prefix      = "${var.prefix}-hashicat-"
   byte_length = 8
 }
 
-resource aws_internet_gateway "hashicat" {
+resource "aws_internet_gateway" "hashicat" {
   vpc_id = aws_vpc.hashicat.id
 
   tags = {
@@ -73,7 +74,7 @@ resource aws_internet_gateway "hashicat" {
   }
 }
 
-resource aws_route_table "hashicat" {
+resource "aws_route_table" "hashicat" {
   vpc_id = aws_vpc.hashicat.id
 
   route {
@@ -82,16 +83,16 @@ resource aws_route_table "hashicat" {
   }
 }
 
-resource aws_route_table_association "hashicat" {
+resource "aws_route_table_association" "hashicat" {
   subnet_id      = aws_subnet.hashicat.id
   route_table_id = aws_route_table.hashicat.id
 }
 
-data aws_ami "ubuntu" {
+data "aws_ami" "ubuntu" {
   most_recent = true
 
   filter {
-    name   = "name"
+    name = "name"
     #values = ["ubuntu/images/hvm-ssd/ubuntu-disco-19.04-amd64-server-*"]
     values = ["ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-amd64-server-*"]
   }
@@ -104,7 +105,17 @@ data aws_ami "ubuntu" {
   owners = ["099720109477"] # Canonical
 }
 
-resource aws_instance "hashicat" {
+resource "aws_eip" "hashicat" {
+  instance = aws_instance.hashicat.id
+  vpc      = true
+}
+
+resource "aws_eip_association" "hashicat" {
+  instance_id   = aws_instance.hashicat.id
+  allocation_id = aws_eip.hashicat.id
+}
+
+resource "aws_instance" "hashicat" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   key_name                    = aws_key_pair.hashicat.key_name
@@ -132,19 +143,12 @@ resource aws_instance "hashicat" {
 # Add execute permissions to our scripts.
 # Run the deploy_app.sh script.
 resource "null_resource" "configure-cat-app" {
-  depends_on = [
-    aws_instance.hashicat,
-  ]
+  depends_on = [aws_eip_association.hashicat]
 
-  # Terraform 0.11
-  # triggers {
-  #   build_number = "${timestamp()}"
-  # }
-
-  # Terraform 0.12
   triggers = {
     build_number = timestamp()
   }
+
   provisioner "file" {
     source      = "files/"
     destination = "/home/ubuntu/"
@@ -153,9 +157,10 @@ resource "null_resource" "configure-cat-app" {
       type        = "ssh"
       user        = "ubuntu"
       private_key = tls_private_key.hashicat.private_key_pem
-      host        = aws_instance.hashicat.public_ip
+      host        = aws_eip.hashicat.public_ip
     }
   }
+
   provisioner "remote-exec" {
     inline = [
       "sudo add-apt-repository universe",
@@ -165,26 +170,28 @@ resource "null_resource" "configure-cat-app" {
       "sudo chown -R ubuntu:ubuntu /var/www/html",
       "chmod +x *.sh",
       "PLACEHOLDER=${var.placeholder} WIDTH=${var.width} HEIGHT=${var.height} PREFIX=${var.prefix} ./deploy_app.sh",
+      "sudo apt -y install cowsay",
+      "cowsay Mooooooooooo!",
     ]
 
     connection {
       type        = "ssh"
       user        = "ubuntu"
       private_key = tls_private_key.hashicat.private_key_pem
-      host        = aws_instance.hashicat.public_ip
+      host        = aws_eip.hashicat.public_ip
     }
   }
 }
 
-resource tls_private_key "hashicat" {
+resource "tls_private_key" "hashicat" {
   algorithm = "RSA"
 }
 
 locals {
-  private_key_filename = "${var.prefix}-ssh-key.pem"
+  private_key_filename = "${random_id.app-server-id.dec}-ssh-key.pem"
 }
 
-resource aws_key_pair "hashicat" {
+resource "aws_key_pair" "hashicat" {
   key_name   = local.private_key_filename
   public_key = tls_private_key.hashicat.public_key_openssh
 }
